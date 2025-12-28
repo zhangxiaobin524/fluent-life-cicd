@@ -1,0 +1,134 @@
+name: CD - Deploy to Server
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+
+env:
+  DOCKER_BUILDKIT: 1
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create deployment directory on server
+        run: |
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            mkdir -p /opt/fluent-life/fluent-life-api
+            mkdir -p /opt/fluent-life/fluent-life-frontend
+          EOF
+
+      - name: Copy files to server
+        run: |
+          # 使用 rsync 同步文件（排除 node_modules, .git 等）
+          rsync -avz --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude 'dist' \
+            --exclude '*.log' \
+            --exclude '.env' \
+            ./fluent-life-api/ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/fluent-life/fluent-life-api/
+          
+          rsync -avz --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude 'dist' \
+            --exclude '*.log' \
+            ./fluent-life-frontend/ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/fluent-life/fluent-life-frontend/
+
+      - name: Deploy on server
+        run: |
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'DEPLOY_SCRIPT'
+            set -e
+            cd /opt/fluent-life/fluent-life-api
+            
+            # 检查 .env 文件是否存在
+            if [ ! -f .env ]; then
+              echo "⚠️  .env 文件不存在，请手动创建"
+              exit 1
+            fi
+            
+            # 确保使用 docker compose v2
+            if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              COMPOSE_CMD="docker compose"
+            elif command -v docker-compose &> /dev/null; then
+              COMPOSE_CMD="docker-compose"
+            else
+              echo "❌ Docker Compose 未安装"
+              exit 1
+            fi
+            
+            # 拉取最新代码（如果使用 git）
+            # git pull origin main || true
+            
+            # 停止旧容器
+            echo "🛑 停止旧容器..."
+            $COMPOSE_CMD down || true
+            
+            # 构建新镜像
+            echo "🔨 构建 Docker 镜像..."
+            $COMPOSE_CMD build --no-cache
+            
+            # 启动服务
+            echo "🚀 启动服务..."
+            $COMPOSE_CMD up -d
+            
+            # 等待服务启动
+            echo "⏳ 等待服务启动..."
+            sleep 15
+            
+            # 检查服务状态
+            echo "📊 检查服务状态..."
+            $COMPOSE_CMD ps
+            
+            # 健康检查
+            echo "🏥 健康检查..."
+            sleep 5
+            
+            # 检查后端
+            if curl -f http://localhost:8081/health > /dev/null 2>&1; then
+              echo "✅ 后端服务健康"
+            else
+              echo "❌ 后端服务不健康"
+              $COMPOSE_CMD logs --tail 50 backend
+              exit 1
+            fi
+            
+            # 检查前端
+            if curl -f http://localhost > /dev/null 2>&1; then
+              echo "✅ 前端服务正常"
+            else
+              echo "❌ 前端服务异常"
+              $COMPOSE_CMD logs --tail 50 frontend
+              exit 1
+            fi
+            
+            echo "✅ 部署完成！"
+          DEPLOY_SCRIPT
+
+      - name: Deployment summary
+        run: |
+          echo "## 🚀 部署完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **后端 API**: http://${{ secrets.SERVER_HOST }}:8081" >> $GITHUB_STEP_SUMMARY
+          echo "- **前端**: http://${{ secrets.SERVER_HOST }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **健康检查**: http://${{ secrets.SERVER_HOST }}:8081/health" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "部署时间: $(date)" >> $GITHUB_STEP_SUMMARY
+
