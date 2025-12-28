@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# GitHub Actions 快速设置脚本
+# GitHub Actions 快速设置脚本1 
 # 位置: fluent-life-cicd/setup-github-actions.sh
 # 用途: 生成 SSH 密钥并配置 GitHub Actions Secrets
 # 使用方法: cd fluent-life-cicd && ./setup-github-actions.sh
